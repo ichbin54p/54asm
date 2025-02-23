@@ -1,7 +1,6 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <unistd.h>
 
 FILE* rlog;
 FILE* disk_file;
@@ -504,8 +503,6 @@ int execute(char* path){
             printf("error: null pointer at index: %d\n", ii);
             break;
         }
-
-        usleep(500);
     }
 
     printf("execute %s: freeing memory\n", path);
