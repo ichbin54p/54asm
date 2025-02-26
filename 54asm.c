@@ -1,19 +1,21 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
+#include <unistd.h>
 
 FILE* rlog;
-FILE* disk_file;
-FILE* port_file;
 
 int compile_size;
 int disk_size = 1024;
-int ram_amount = 256;
+int ram_amount = 256 * 3;
 int reg_amount = 4;
 int port_count = 8;
 int ii;
 
 signed int* reg;
+unsigned char opl;
+unsigned char opv[2];
+unsigned char opi;
 unsigned char flags[3] = {1, 0, 0};
 unsigned char* ram;
 unsigned char* opr1;
@@ -110,7 +112,7 @@ int compile(char* path){
     int ii = 0;
     int ps = est_size(path) * 3;
     char offset = 64;
-    char* line = malloc(20);
+    char* line = malloc(500);
 
     fprintf(log, "est_size returned %d\n", ps);
 
@@ -122,7 +124,7 @@ int compile(char* path){
 
     fprintf(build, "%c", offset);
 
-    while (fgets(line, 20, f)){
+    while (fgets(line, 500, f)){
         if (line[0] == '#' || line[0] == '\n'){
             fprintf(log, "comment or newline, ignoring\n");
         } else {
@@ -166,17 +168,36 @@ int compile(char* path){
             } else if (strncmp(line, "SUB", 3) == 0){
                 fprintf(build, "%c", 11 + offset);
                 ii += 1;
+            } else if (strncmp(line, "INC", 3) == 0){
+                fprintf(build, "%c", 12 + offset);
+                ii += 1;
+                np = 1;
+            } else if (strncmp(line, "DEC", 3) == 0){
+                fprintf(build, "%c", 13 + offset);
+                ii += 1;
+                np = 1;
+            } else if (strncmp(line, "OPS", 3) == 0){
+                fprintf(build, "%c", 14 + offset);
+                ii += 1;
+            } else if (strncmp(line, "OPL", 3) == 0){
+                fprintf(build, "%c", 15 + offset);
+                ii += 1;
+                np = 1;
             } else if (strncmp(line, "OPR", 3) == 0){
                 // fprintf(build, "%c", offset);
                 ii += 1;
             } else {
-                fprintf(build, "%c", offset - 1);
+                // fprintf(build, "%c", offset - 1);
                 fprintf(log, "- Unkown opcode\n");
                 ii += 1;
+                np = 1;
             }
 
             if (!np){
-                fprintf(build, "%c", (unsigned char) ifl(line, 4));
+                unsigned char operand = (unsigned char) ifl(line, 4);
+
+                fprintf(build, "%c", operand);
+                fprintf(log, "- operand: %d\n", operand);
             }
         }
     }
@@ -191,112 +212,249 @@ int compile(char* path){
     return 0;
 }
 
-
 void update_flags(){
-    // fprintf(rlog, "\n-- Flags update --\n");
+    flags[1] = 0;
+    flags[2] = 0;
 
     if (reg[0] == 0){
         flags[1] = 1;
     } else if (reg[0] > 255){
         flags[2] = 1;
-        flags[1] = 0;
         reg[0] -= 256;
     } else if (reg[0] < 0){
         flags[2] = 1;
-        flags[1] = 0;
         reg[0] += 256;
     }
+
+    fprintf(rlog, "\nFlags update:\n- None: %d\n- Zero: %d\n- Cout: %d\n", flags[0], flags[1], flags[2]);
 }
 
 void update(){
-    fseek(disk_file, 0, SEEK_SET);
-    fseek(port_file, 0, SEEK_SET);
+    if (opl){
+        opl -= 1;
+    }
+}
+
+void LDI(){
+    if (opl){
+        fprintf(rlog, "%d: Loading immediate (%d) into reg0 (%d)\n", ii, opv[0], reg[0]);
+
+        reg[0] = opv[0];
+    } else {
+        fprintf(rlog, "%d: Loading immediate (%d) into reg0 (%d)\n", ii, opr1[ii], reg[0]);
+
+        reg[0] = opr1[ii];
+    }
 
     update_flags();
 }
 
-void LDI(){
-    fprintf(rlog, "%d: Loading immediate (%d) into reg0 (%d)\n", ii, opr1[ii], reg[0]);
-
-    reg[0] = opr1[ii];
-}
-
 void RST(){
-    fprintf(rlog, "%d: Loading reg0 (%d) into reg%d (%d)\n", ii, reg[0], opr1[ii] + 1, reg[opr1[ii]+1]);
+    if (opl){
+        fprintf(rlog, "%d: Loading reg0 (%d) into reg%d (%d)\n", ii, reg[0], opv[0] + 1, reg[opv[0]+1]);
 
-    reg[opr1[ii]+1] = reg[0];
+        reg[opv[0]+1] = reg[0];
+    } else {
+        fprintf(rlog, "%d: Loading reg0 (%d) into reg%d (%d)\n", ii, reg[0], opr1[ii] + 1, reg[opr1[ii]+1]);
+
+        reg[opr1[ii]+1] = reg[0];
+    }
 }
 
 void RLD(){
-    fprintf(rlog, "%d: Loading reg%d (%d) into reg0 (%d)\n", ii, opr1[ii]+1, reg[opr1[ii]+1], reg[0]);
+    if (opl){
+        fprintf(rlog, "%d: Loading reg%d (%d) into reg0 (%d)\n", ii, opv[0]+1, reg[opv[0]+1], reg[0]);
 
-    reg[0] = reg[opr1[ii]+1];
+        reg[0] = reg[opv[0]+1];
+    } else {
+        fprintf(rlog, "%d: Loading reg%d (%d) into reg0 (%d)\n", ii, opr1[ii]+1, reg[opr1[ii]+1], reg[0]);
+
+        reg[0] = reg[opr1[ii]+1];
+    }
 }
 
 void PST(){
-    fprintf(rlog, "%d: Loading reg0 (%d) into port%d\n", ii, reg[0], opr1[ii]);
-    fseek(port_file, opr1[ii], SEEK_SET);
-    fprintf(port_file, "%c", reg[0]);
+    FILE* port_file = fopen(port_path, "r+");
+
+    if (opl){
+        fprintf(rlog, "%d: Loading reg0 (%d) into port%d\n", ii, reg[0], opv[0]);
+        fseek(port_file, opv[0], SEEK_SET);
+        fprintf(port_file, "%c", reg[0]);
+    } else {
+        fprintf(rlog, "%d: Loading reg0 (%d) into port%d\n", ii, reg[0], opr1[ii]);
+        fseek(port_file, opr1[ii], SEEK_SET);
+        fprintf(port_file, "%c", reg[0]);
+    }
+
+    fclose(port_file);
 }
 
 void PLD(){
-    fprintf(rlog, "%d: Loading port%d into reg0 (%d)\n", ii, opr1[ii], reg[0]);
-    fseek(port_file, opr1[ii], SEEK_SET);
+    FILE* port_file = fopen(port_path, "r");
 
-    reg[0] = fgetc(port_file);
+    if (opl){
+        fprintf(rlog, "%d: Loading port%d into reg0 (%d)\n", ii, opv[0], reg[0]);
+        fseek(port_file, opv[0], SEEK_SET);
+
+        reg[0] = fgetc(port_file);
+    } else {
+        fprintf(rlog, "%d: Loading port%d into reg0 (%d)\n", ii, opr1[ii], reg[0]);
+        fseek(port_file, opr1[ii], SEEK_SET);
+
+        reg[0] = fgetc(port_file);
+    }
+
+    fclose(port_file);
 }
 
 void STR(){
-    fprintf(rlog, "%d: Loading reg0 (%d) into ram address %d (%d)\n", ii, reg[0], opr1[ii], ram[opr1[ii]]);
+    if (opl){
+        fprintf(rlog, "%d: Loading reg0 (%d) into ram address %d (%d)\n", ii, reg[0], (opv[0] * 256) + opv[1], ram[(opv[0]*256)+opv[1]]);
 
-    ram[opr1[ii]] = reg[0];
+        ram[(opv[0]*256)+opv[1]] = reg[0];
+    } else {
+        fprintf(rlog, "%d: Loading reg0 (%d) into ram address %d (%d)\n", ii, reg[0], (opr1[ii] * 256) + opr2[ii], ram[(opr1[ii]*256)+opr2[ii]]);
+
+        ram[(opr1[ii]*256)+opr2[ii]] = reg[0];
+    }
 }
 
 void LOD(){
-    fprintf(rlog, "%d: Loading ram address %d (%d) into reg0 (%d)\n", ii, opr1[ii], ram[opr1[ii]], reg[0]);
+    if (opl){
+        fprintf(rlog, "%d: Loading ram address %d (%d) into reg0 (%d)\n", ii, (opv[0] * 256) + opv[1], ram[(opv[0]*256)+opv[1]], reg[0]);
 
-    reg[0] = ram[opr1[ii]];
+        reg[0] = ram[(opv[0]*256)+opv[1]];
+    } else {
+        fprintf(rlog, "%d: Loading ram address %d (%d) into reg0 (%d)\n", ii, (opr1[ii] *  256) + opr2[ii], ram[(opr1[ii]*256)+opr2[ii]], reg[0]);
+
+        reg[0] = ram[(opr1[ii]*256)+opr2[ii]];
+    }
 }
 
 void DST(){
-    fprintf(rlog, "%d: Loading reg0 (%d) into disk address %d\n", ii, reg[0], opr1[ii]);
-    fseek(disk_file, opr1[ii], SEEK_SET);
-    fprintf(disk_file, "%c", reg[0]);
+    FILE* disk_file = fopen(disk_path, "r+");
+
+    if (opl){
+        fprintf(rlog, "%d: Loading reg0 (%d) into disk address %d\n", ii, reg[0], (opv[0] * 256) + opv[1]);
+        fseek(disk_file, (opv[0] * 256) + opv[1], SEEK_SET);
+        fprintf(disk_file, "%c", reg[0]);
+    } else {
+        fprintf(rlog, "%d: Loading reg0 (%d) into disk address %d\n", ii, reg[0], (opr1[ii] * 256) + opr2[ii]);
+        fseek(disk_file, (opr1[ii] * 256) + opr2[ii], SEEK_SET);
+        fprintf(disk_file, "%c", reg[0]);
+    }
+
+    fclose(disk_file);
 }
 
 void DLD(){
-    fprintf(rlog, "%d: Loading disk address %d into reg0\n", ii, opr1[ii], reg[0]);
-    fseek(disk_file, opr1[ii], SEEK_SET);
+    FILE* disk_file = fopen(disk_path, "r");
 
-    reg[0] = fgetc(disk_file);
+    if (opl){
+        fprintf(rlog, "%d: Loading disk address %d into reg0\n", ii, (opv[0] * 256) + opv[1], reg[0]);
+        fseek(disk_file, (opv[0] * 256) + opv[1], SEEK_SET);
+
+        reg[0] = fgetc(disk_file);
+    } else {
+        fprintf(rlog, "%d: Loading disk address %d into reg0\n", ii, (opr1[ii] * 256) + opr2[ii], reg[0]);
+        fseek(disk_file, (opr1[ii] * 256) + opr2[ii], SEEK_SET);
+
+        reg[0] = fgetc(disk_file);
+    }
+    
+    fclose(disk_file);
 }
 
 void BRC(){
-    fprintf(rlog, "%d: Attempting to branch to instruction %d, flag %d\n", ii, opr2[ii], opr1[ii]);
+    if (opl){
+        fprintf(rlog, "%d: Attempting to branch to instruction %d, flag %d\n", ii, opv[1], opv[0]);
 
-    if (opr1[ii] < 3){
-        if (flags[opr1[ii]]){
-            fprintf(rlog, "- True: jumping (%d)\n", flags[opr1[ii]]);
+        if (opv[0] < 3){
+            if (flags[opv[0]]){
+                fprintf(rlog, "- True: jumping (%d)\n", flags[opv[0]]);
 
-            ii = opr2[ii] - 1;
+                ii = opv[1] - 1;
+            } else {
+                fprintf(rlog, "- False: ignore (%d)\n", flags[opv[0]]);
+            }
         } else {
-            fprintf(rlog, "- False: ignore (%d)\n", flags[opr1[ii]]);
+            fprintf(rlog, "- False: unkown flag\n");
         }
     } else {
-        fprintf(rlog, "- False: unkown flag\n");
+        fprintf(rlog, "%d: Attempting to branch to instruction %d, flag %d\n", ii, opr2[ii], opr1[ii]);
+
+        if (opr1[ii] < 3){
+            if (flags[opr1[ii]]){
+                fprintf(rlog, "- True: jumping (%d)\n", flags[opr1[ii]]);
+
+                ii = opr2[ii] - 1;
+            } else {
+                fprintf(rlog, "- False: ignore (%d)\n", flags[opr1[ii]]);
+            }
+        } else {
+            fprintf(rlog, "- False: unkown flag\n");
+        }
     }
 }
 
 void ADD(){
-    fprintf(rlog, "%d: Adding reg0 (%d) with reg%d (%d)\n", ii,  reg[0], opr1[ii] + 1, reg[opr1[ii]+1]);
+    if (opl){
+        fprintf(rlog, "%d: Adding reg0 (%d) with reg%d (%d) = %d\n", ii,  reg[0], opv[0] + 1, reg[opv[0]+1], reg[0] + reg[opv[0]+1]);
 
-    reg[0] += reg[opr1[ii]+1];
+        reg[0] += reg[opv[0]+1];
+    } else {
+        fprintf(rlog, "%d: Adding reg0 (%d) with reg%d (%d) = %d\n", ii,  reg[0], opr1[ii] + 1, reg[opr1[ii]+1], reg[0] + reg[opv[0]+1]);
+
+        reg[0] += reg[opr1[ii]+1];
+    }
+
+    update_flags();
 }
 
 void SUB(){
-    fprintf(rlog, "%d: Subtracting reg0 (%d) with reg%d (%d)\n", ii,  reg[0], opr1[ii] + 1, reg[opr1[ii]+1]);
+    if (opl){
+        fprintf(rlog, "%d: Subtracting reg0 (%d) with reg%d (%d) = %d\n", ii,  reg[0], opv[0] + 1, reg[opv[0]+1], reg[0] - reg[opv[0]+1]);
 
-    reg[0] -= reg[opr1[ii]+1];
+        reg[0] -= reg[opv[0]+1];
+    } else {
+        fprintf(rlog, "%d: Subtracting reg0 (%d) with reg%d (%d) = %d\n", ii,  reg[0], opr1[ii] + 1, reg[opr1[ii]+1], reg[0] - reg[opv[0]+1]);
+
+        reg[0] -= reg[opr1[ii]+1];
+    }
+
+    update_flags();
+}
+
+void INC(){
+    fprintf(rlog, "%d: Incrementing reg0 (%d)\n", ii, reg[0]);
+
+    reg[0] += 1;
+
+    update_flags();
+}
+
+void DEC(){
+    fprintf(rlog, "%d: Decrementing reg0 (%d)\n", ii, reg[0]);
+
+    reg[0] -= 1;
+
+    update_flags();
+}
+
+void OPS(){
+    fprintf(rlog, "%d: Saving operand %d, value = reg0(%d)\n", ii, opr1[ii], reg[0]);
+
+    if (opr1[ii] < 2){
+        opv[opr1[ii]] = reg[0];
+    } else {
+        fprintf(rlog, "- Out of range\n");
+    }
+}
+
+void OPL(){
+    fprintf(rlog, "%d: Loading operand values %d %d\n", ii, opv[0], opv[1]);
+
+    opl = 2;
 }
 
 int execute(char* path){
@@ -311,29 +469,26 @@ int execute(char* path){
     sprintf(disk_path, "%s.disk", path);
     sprintf(port_path, "%s.ports", path);
 
+    printf("execute %s: files:\n- %s\n- %s\n- %s\n", path, log_path, disk_path, port_path);
+
     FILE* temp = fopen(log_path, "w");
     FILE* build = fopen(path, "r");
+    FILE* port_file = fopen(port_path, "w");
 
     fprintf(temp, "--- 54asm: %s run log ---\n\n", path);
     fclose(temp);
 
     rlog = fopen(log_path, "a");
-    disk_file = fopen(disk_path, "r+");
-    port_file = fopen(port_path, "r+");
-
-    if (!port_file || !disk_file){
-        return -1;
-    }
 
     free(log_path);
 
-    char* line = malloc(100);
+    char* line = malloc(10000);
 
     ii = 0;
 
     char offset;
     int i = 0;
-    size_t ps = fread(line, 1, 100, build);
+    size_t ps = fread(line, 1, 10000, build);
     void (**ins)() = malloc(ps * sizeof(void (*)()));
 
     ram = malloc(ram_amount * sizeof(char));
@@ -349,6 +504,7 @@ int execute(char* path){
         fprintf(port_file, "%c", 0);
     }
 
+    fclose(port_file);
     printf("execute %s: converting program, %d bytes\n", path, ps);
 
     while (i < ps){
@@ -359,7 +515,7 @@ int execute(char* path){
         } else {
             switch (line[i] - offset){
                 case 0:
-                    printf("execute %s: %d, detected: LDI %d --> %d\n", path, i, line[i+1], ii);
+                    printf("execute %s: %d, detected LDI %d --> %d\n", path, i, line[i+1], ii);
 
                     ins[ii] = LDI;
                     opr1[ii] = line[i+1];
@@ -475,14 +631,49 @@ int execute(char* path){
                     ii += 1;
 
                     break;
+                case 12:
+                    printf("execute %s: %d, detected INC --> %d\n", path, i, ii);
+
+                    ins[ii] = INC;
+
+                    i += 1;
+                    ii += 1;
+
+                    break;
+                case 13:
+                    printf("execute %s: %d, detected DEC --> %d\n", path, i, ii);
+
+                    ins[ii] = DEC;
+
+                    i += 1;
+                    ii += 1;
+
+                    break;
+                case 14:
+                    printf("execute %s: %d, detected OPS %d --> %d\n", path, i, line[i+1], ii);
+
+                    ins[ii] = OPS;
+                    opr1[ii] = line[i+1];
+
+                    i += 2;
+                    ii += 1;
+
+                    break;
+                case 15:
+                    printf("execute %s: %d, detected OPL --> %d\n", path, i, ii);
+
+                    ins[ii] = OPL;
+
+                    i += 1;
+                    ii += 1;
+
+                    break;
                 default:
-                    printf("execute %s: %d, detected UNK\n", path, i);
+                    printf("execute %s: %d, detected UNK %d %d --> %d \n", path, i, offset, line[i], ii);
 
                     i += 1;
                     break;
             }
-
-            update();
         }
 
         // printf("%d < %d\n", i, ps);
@@ -491,6 +682,7 @@ int execute(char* path){
     printf("execute %s: executing program (length: %d) with offset %d\n", path, ii, offset);
 
     int pl = ii;
+    int ei = 0;
     ii = 0;
 
     while (ii < pl){
@@ -503,14 +695,18 @@ int execute(char* path){
             printf("error: null pointer at index: %d\n", ii);
             break;
         }
+
+        ei += 1;
+
+        fprintf(rlog, "\n");
+        fflush(rlog);
+        usleep(100);
     }
 
-    printf("execute %s: freeing memory\n", path);
+    printf("execute %s: executed %d instructions, freeing memory\n", path, ei);
 
     fclose(build);
     fclose(rlog);
-    fclose(disk_file);
-    fclose(port_file);
     free(line);
     free(ram);
     free(reg);
@@ -549,3 +745,5 @@ int main(int argc, char** argv){
 
     return 0;
 }
+
+// hello
